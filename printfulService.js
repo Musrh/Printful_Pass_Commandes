@@ -1,73 +1,84 @@
 // printfulService.js
 import express from "express";
-import fetch from "node-fetch";
+import fetch from "node-fetch"; // npm install node-fetch
 import dotenv from "dotenv";
-import admin from "firebase-admin";
 
 dotenv.config();
 const app = express();
 app.use(express.json());
 
-// 🔥 Firestore
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-const db = admin.firestore();
-
-// 🔑 Printful
+// ----------------------------
+// 🔑 Clé API Printful
+// ----------------------------
 const PRINTFUL_API_KEY = process.env.PRINTFUL_API_KEY;
 const PRINTFUL_URL = "https://api.printful.com/orders";
 
-// Endpoint pour créer une commande Printful depuis paiement
+// ----------------------------
+// Route GET pour tester le serveur
+// ----------------------------
+app.get("/", (req, res) => {
+  res.send("Printful service is running 🚀");
+});
+
+// ----------------------------
+// POST /create-order
+// Crée une commande Printful
+// ----------------------------
 app.post("/create-order", async (req, res) => {
-  const { firestoreId, order } = req.body;
-  // order doit contenir: nomClient, adresse, ville, pays, codePostal, items
+  const { order } = req.body;
+
+  if (!order) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Order object is required" });
+  }
 
   try {
+    // Préparer le body pour Printful
     const body = {
       recipient: {
         name: order.nomClient,
         address1: order.adresse,
         city: order.ville,
         country_code: order.pays,
-        zip: order.codePostal
+        zip: order.codePostal,
       },
-      items: order.items.map(i => ({
+      items: order.items.map((i) => ({
         variant_id: i.variant_id,
         quantity: i.quantity,
-        name: i.nom
-      }))
+        name: i.nom,
+      })),
     };
 
     const response = await fetch(PRINTFUL_URL, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${PRINTFUL_API_KEY}`,
-        "Content-Type": "application/json"
+        Authorization: `Bearer ${PRINTFUL_API_KEY}`,
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
     });
 
     const data = await response.json();
-    if (!response.ok) throw new Error(data?.error?.message || "Erreur Printful");
 
-    console.log("✅ Commande Printful passée:", data.result?.id);
-
-    // 🔹 Mettre à jour Firestore avec ID et status Printful
-    if (firestoreId) {
-      await db.collection("commandes").doc(firestoreId).update({
-        printfulOrderId: data.result.id,
-        printfulStatus: data.result.status,
-      });
-      console.log(`✅ Firestore mis à jour avec Printful ID pour ${firestoreId}`);
+    if (!response.ok) {
+      console.error("❌ Printful error:", data);
+      return res
+        .status(response.status)
+        .json({ success: false, message: data?.error?.message || "Printful error" });
     }
 
+    console.log("✅ Commande Printful créée :", data);
     res.json({ success: true, data });
   } catch (err) {
-    console.error("❌ Printful order failed:", err.message);
+    console.error("❌ Printful request failed:", err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
+// ----------------------------
+// Démarrage serveur
+// ----------------------------
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () =>
   console.log(`🚀 Printful service running on port ${PORT}`)
