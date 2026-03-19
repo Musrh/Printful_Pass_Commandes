@@ -1,71 +1,59 @@
 import express from "express";
-import cors from "cors";
 import fetch from "node-fetch";
 import admin from "firebase-admin";
 import dotenv from "dotenv";
 
 dotenv.config();
 const app = express();
-
-app.use(cors({
-  origin: "https://wellshoppings.com",
-  methods: ["POST", "GET"],
-  allowedHeaders: ["Content-Type"]
-}));
-
 app.use(express.json());
 
-// 🔥 Firebase
+// 🔹 Firebase
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
-
+admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
-const PRINTFUL_API_KEY = process.env.PRINTFUL_API_KEY;
-const PRINTFUL_URL = "https://api.printful.com/orders";
+// 🔹 Fonction pour transformer id → variant_id
+function transformItemsForPrintful(items) {
+  return items.map(i => ({
+    variant_id: i.id, // id stocké dans Firestore devient variant_id pour Printful
+    quantity: i.quantity,
+    name: i.nom
+  }));
+}
 
-// ✅ Route Admin
+// 🔹 Route admin pour envoyer commande à Printful
 app.post("/admin/send-to-printful/:orderId", async (req, res) => {
   const { orderId } = req.params;
 
   try {
-    const docRef = db.collection("commandes").doc(orderId);
-    const docSnap = await docRef.get();
+    const orderSnap = await db.collection("commandes").doc(orderId).get();
+    if (!orderSnap.exists) return res.status(404).json({ message: "Commande non trouvée" });
 
-    if (!docSnap.exists) {
-      return res.status(404).json({ error: "Commande introuvable" });
+    const order = orderSnap.data();
+
+    if (!order.items || order.items.length === 0) {
+      return res.status(400).json({ message: "Aucun produit dans la commande" });
     }
 
-    const order = docSnap.data();
-
-    if (order.envoye_printful) {
-      return res.json({ message: "Déjà envoyée à Printful" });
-    }
-
-    // 🔄 Construire items Printful
-    const items = order.items.map(item => ({
-      variant_id: item.variant_id || item.id,
-      quantity: item.quantity
-    }));
+    // Transformation id → variant_id
+    const printfulItems = transformItemsForPrintful(order.items);
 
     const body = {
       recipient: {
-        name: order.email,
-        address1: order.adresseLivraison,
-        city: "",
-        country_code: "FR",
-        zip: ""
+        name: order.email || "Client",
+        address1: order.adresseLivraison || "",
+        city: order.city || "",
+        country_code: order.pays || "FR",
+        zip: order.zip || ""
       },
-      items
+      items: printfulItems
     };
 
-    const response = await fetch(PRINTFUL_URL, {
+    // Envoi à Printful
+    const response = await fetch("https://api.printful.com/orders", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${PRINTFUL_API_KEY}`,
+        "Authorization": `Bearer ${process.env.PRINTFUL_API_KEY}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify(body)
@@ -73,31 +61,18 @@ app.post("/admin/send-to-printful/:orderId", async (req, res) => {
 
     const data = await response.json();
 
-    if (!response.ok) {
-      console.error("❌ Printful error:", data);
-      return res.status(500).json({ error: data });
-    }
+    if (!response.ok) throw new Error(data?.error?.message || "Erreur Printful");
 
-    await docRef.update({
-      envoye_printful: true,
-      printful_order_id: data.result.id
-    });
+    // Marquer commande comme envoyée
+    await db.collection("commandes").doc(orderId).update({ envoyePrintful: true });
 
-    console.log("✅ Commande envoyée à Printful");
-
-    res.json({ success: true });
-
+    console.log("✅ Commande envoyée à Printful:", data);
+    res.json({ success: true, data });
   } catch (err) {
-    console.error("❌ Erreur:", err);
-    res.status(500).json({ error: err.message });
+    console.error("❌ Envoi Printful failed:", err.message);
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
-app.get("/", (req, res) => {
-  res.send("🚀 Printful service running");
-});
-
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () =>
-  console.log(`🚀 Printful service running on port ${PORT}`)
-);
+app.listen(PORT, () => console.log(`🚀 Printful service running on port ${PORT}`));
