@@ -1,132 +1,103 @@
-// printfulService.js
 import express from "express";
+import cors from "cors";
 import fetch from "node-fetch";
+import admin from "firebase-admin";
 import dotenv from "dotenv";
 
 dotenv.config();
-
 const app = express();
+
+app.use(cors({
+  origin: "https://wellshoppings.com",
+  methods: ["POST", "GET"],
+  allowedHeaders: ["Content-Type"]
+}));
+
 app.use(express.json());
 
-// ----------------------------
-// 🔐 CONFIG
-// ----------------------------
+// 🔥 Firebase
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const db = admin.firestore();
+
 const PRINTFUL_API_KEY = process.env.PRINTFUL_API_KEY;
-
-if (!PRINTFUL_API_KEY) {
-  console.error("❌ PRINTFUL_API_KEY manquante dans Railway !");
-  process.exit(1);
-}
-
 const PRINTFUL_URL = "https://api.printful.com/orders";
 
-// ----------------------------
-// 🚀 CREATE PRINTFUL ORDER
-// ----------------------------
-app.post("/create-order", async (req, res) => {
-  console.log("📦 Requête reçue du backend paiement");
-
-  const { order } = req.body;
-
-  if (!order) {
-    console.error("❌ Aucune donnée order reçue");
-    return res.status(400).json({ success: false, message: "Order manquant" });
-  }
-
-  console.log("📝 Données reçues :", JSON.stringify(order, null, 2));
+// ✅ Route Admin
+app.post("/admin/send-to-printful/:orderId", async (req, res) => {
+  const { orderId } = req.params;
 
   try {
-    // 🔎 Validation minimale
-    if (!order.nomClient || !order.adresse || !order.pays) {
-      throw new Error("Informations client incomplètes");
+    const docRef = db.collection("commandes").doc(orderId);
+    const docSnap = await docRef.get();
+
+    if (!docSnap.exists) {
+      return res.status(404).json({ error: "Commande introuvable" });
     }
 
-    if (!order.items || !Array.isArray(order.items) || order.items.length === 0) {
-      throw new Error("Aucun item dans la commande");
+    const order = docSnap.data();
+
+    if (order.envoye_printful) {
+      return res.json({ message: "Déjà envoyée à Printful" });
     }
 
-    // ⚠️ Vérification variant_id obligatoire
-    order.items.forEach((item) => {
-      if (!item.variant_id) {
-        throw new Error(
-          `variant_id manquant pour produit ${item.nom || "inconnu"}`
-        );
-      }
-    });
+    // 🔄 Construire items Printful
+    const items = order.items.map(item => ({
+      variant_id: item.variant_id || item.id,
+      quantity: item.quantity
+    }));
 
-    // ----------------------------
-    // 🧾 Construction corps Printful
-    // ----------------------------
     const body = {
       recipient: {
-        name: order.nomClient,
-        address1: order.adresse,
-        city: order.ville || "Unknown",
-        country_code: order.pays,
-        zip: order.codePostal || "00000",
+        name: order.email,
+        address1: order.adresseLivraison,
+        city: "",
+        country_code: "FR",
+        zip: ""
       },
-      items: order.items.map((i) => ({
-        variant_id: Number(i.variant_id),
-        quantity: Number(i.quantity),
-      })),
+      items
     };
 
-    console.log("📤 Envoi vers Printful :", JSON.stringify(body, null, 2));
-
-    // ----------------------------
-    // 📡 Appel API Printful
-    // ----------------------------
     const response = await fetch(PRINTFUL_URL, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${PRINTFUL_API_KEY}`,
-        "Content-Type": "application/json",
+        "Authorization": `Bearer ${PRINTFUL_API_KEY}`,
+        "Content-Type": "application/json"
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(body)
     });
 
     const data = await response.json();
 
-    console.log("📥 Réponse API Printful :", JSON.stringify(data, null, 2));
-
     if (!response.ok) {
-      throw new Error(data?.error?.message || "Erreur API Printful");
+      console.error("❌ Printful error:", data);
+      return res.status(500).json({ error: data });
     }
 
-    console.log("✅ COMMANDE CRÉÉE CHEZ PRINTFUL !");
-    console.log("🆔 Printful Order ID :", data.result?.id);
-
-    res.json({
-      success: true,
-      printfulOrderId: data.result?.id,
-      fullResponse: data,
+    await docRef.update({
+      envoye_printful: true,
+      printful_order_id: data.result.id
     });
+
+    console.log("✅ Commande envoyée à Printful");
+
+    res.json({ success: true });
 
   } catch (err) {
-    console.error("❌ ERREUR PRINTFUL :", err.message);
-
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
+    console.error("❌ Erreur:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ----------------------------
-// 🩺 HEALTH CHECK
-// ----------------------------
 app.get("/", (req, res) => {
-  res.json({
-    status: "Printful Service Running",
-    message: "Service opérationnel",
-  });
+  res.send("🚀 Printful service running");
 });
 
-// ----------------------------
-// 🚀 START SERVER
-// ----------------------------
 const PORT = process.env.PORT || 8080;
-
-app.listen(PORT, () => {
-  console.log(`🚀 Printful service running on port ${PORT}`);
-});
+app.listen(PORT, () =>
+  console.log(`🚀 Printful service running on port ${PORT}`)
+);
