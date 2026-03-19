@@ -18,77 +18,58 @@ const db = admin.firestore();
 // 🔹 Route pour envoyer une commande Firestore à Printful
 app.post("/admin/send-to-printful/:orderId", async (req, res) => {
   const { orderId } = req.params;
-  const bodyOrder = req.body; // commande envoyée par front-end
+  const bodyOrder = req.body;
 
-  if (!bodyOrder || !bodyOrder.items) {
-    return res
-      .status(400)
-      .json({ success: false, message: "Données invalides" });
+  if (!bodyOrder || !bodyOrder.items || bodyOrder.items.length === 0) {
+    return res.status(400).json({ success: false, message: "Données invalides" });
   }
 
-  // 🔹 Convertir chaque produit id -> variant_id
-  bodyOrder.items = bodyOrder.items.map((item) => ({
-    ...item,
-    variant_id: item.id, // le champ attendu par Printful
-  }));
-
-  // 🔹 Log pour confirmer variant_id
-  console.log(`📦 Commande reçue : orderId=${orderId}`);
-  bodyOrder.items.forEach((item, idx) => {
-    console.log(
-      `Produit #${idx + 1}: nom=${item.nom}, id=${item.id}, variant_id=${item.variant_id}, quantité=${item.quantity}`
-    );
-  });
-
   try {
-    // 🔹 Envoi à Printful
+    // 🔹 Vérifier / transformer id en variant_id pour chaque produit
+    const itemsForPrintful = bodyOrder.items.map(i => ({
+      variant_id: i.id, // ici on prend id et on renomme variant_id
+      quantity: i.quantity,
+    }));
+
+    console.log(`📝 Variant IDs pour envoi : ${itemsForPrintful.map(i => i.variant_id).join(", ")}`);
+
     const response = await fetch(PRINTFUL_URL, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${PRINTFUL_API_KEY}`,
+        "Authorization": `Bearer ${PRINTFUL_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
         recipient: {
           name: bodyOrder.nomClient || bodyOrder.email,
-          address1: bodyOrder.adresseLivraison || bodyOrder.adresse || "",
+          address1: bodyOrder.adresse || "",
           city: bodyOrder.ville || "",
           country_code: bodyOrder.pays || "FR",
           zip: bodyOrder.codePostal || "",
         },
-        items: bodyOrder.items.map((i) => ({
-          variant_id: i.variant_id,
-          quantity: i.quantity,
-        })),
+        items: itemsForPrintful,
       }),
     });
 
     const data = await response.json();
-
     if (!response.ok) throw new Error(data?.error?.message || "Erreur Printful");
 
     // 🔹 Mettre à jour Firestore pour marquer commande envoyée
-    await db.collection("commandes").doc(orderId).update({
-      envoyePrintful: true,
-      printfulOrderId: data?.result?.id || null,
-    });
+    await db.collection("commandes").doc(orderId).update({ envoyePrintful: true });
 
-    console.log(
-      `✅ Commande ${orderId} envoyée à Printful avec succès. Printful order ID: ${data?.result?.id}`
-    );
+    console.log(`✅ Commande ${orderId} envoyée à Printful avec succès. Printful order ID: ${data?.result?.id}`);
 
     res.json({
       success: true,
-      message: "Commande envoyée à Printful ✅",
-      data,
+      message: `Commande ${orderId} envoyée à Printful ✅`,
+      printfulOrderId: data?.result?.id,
+      items: itemsForPrintful, // pour afficher les variant_id côté front
     });
   } catch (err) {
-    console.error("❌ Erreur Printful:", err.message);
+    console.error(`❌ Erreur Printful pour commande ${orderId}:`, err);
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () =>
-  console.log(`🚀 Printful service running on port ${PORT}`)
-);
+app.listen(PORT, () => console.log(`🚀 Printful service running on port ${PORT}`));
